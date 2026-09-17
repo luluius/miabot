@@ -24,20 +24,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger("TravelStarsBot")
 
-async def start_dummy_webserver():
-    """Démarre un mini-serveur HTTP requis par Render / Koyeb pour les plans gratuits."""
+from bot.crm import setup_crm_routes
+
+async def start_webserver(db: Database):
+    """Démarre le serveur web hébergeant le CRM et le health-check pour Render."""
     port = int(os.environ.get("PORT", 8080))
     app = web.Application()
 
-    async def health(request):
-        return web.Response(text="Bot Telegram actif et en ligne 🚀")
+    # Configuration des routes de la plateforme CRM et des APIs
+    setup_crm_routes(app, db)
 
-    app.router.add_get("/", health)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"Serveur web de santé démarré sur http://0.0.0.0:{port}")
+    logger.info(f"Plateforme CRM en ligne sur http://0.0.0.0:{port}")
 
 async def setup_bot_commands(bot: Bot):
     """Enregistre la liste des commandes suggérées dans le menu Telegram."""
@@ -61,16 +62,16 @@ async def main():
         logger.info("Veuillez éditer le fichier .env avec votre vrai BOT_TOKEN et redémarrer.")
         sys.exit(1)
 
-    # Démarrage du serveur web de santé (requis pour hébergeur gratuit Render/Koyeb)
-    try:
-        await start_dummy_webserver()
-    except Exception as e:
-        logger.warning(f"Impossible de démarrer le serveur web local : {e}")
-
     # Initialisation de la base de données
     db = Database(db_path=config.database_path)
     await db.init_db()
     logger.info(f"Base de données SQLite initialisée : {config.database_path}")
+
+    # Démarrage de la plateforme CRM et du serveur web
+    try:
+        await start_webserver(db)
+    except Exception as e:
+        logger.warning(f"Impossible de démarrer le serveur web CRM : {e}")
 
     # Initialisation du Bot et du Dispatcher
     bot = Bot(

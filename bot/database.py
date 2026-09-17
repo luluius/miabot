@@ -14,9 +14,18 @@ class Database:
                     user_id INTEGER PRIMARY KEY,
                     username TEXT,
                     first_name TEXT,
+                    tag TEXT DEFAULT 'Nouveau',
+                    notes TEXT DEFAULT '',
                     joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
+            # Migration douce pour les bases existantes
+            for col, col_type in [("tag", "TEXT DEFAULT 'Nouveau'"), ("notes", "TEXT DEFAULT ''")]:
+                try:
+                    await db.execute(f"ALTER TABLE subscribers ADD COLUMN {col} {col_type}")
+                except Exception:
+                    pass
 
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS posts (
@@ -45,6 +54,16 @@ class Database:
                     FOREIGN KEY (post_id) REFERENCES posts(id)
                 )
             """)
+
+            # Synchronise les acheteurs dans les abonnés s'ils n'y sont pas
+            try:
+                await db.execute("""
+                    INSERT OR IGNORE INTO subscribers (user_id, username, first_name, joined_at)
+                    SELECT buyer_id, buyer_username, buyer_username, purchased_at FROM sales
+                """)
+            except Exception:
+                pass
+
             await db.commit()
 
     async def register_user(self, user_id: int, username: Optional[str], first_name: Optional[str]):
@@ -204,3 +223,84 @@ class Database:
                 "subscribers_count": subscribers_count,
                 "top_posts": top_posts,
             }
+
+    async def get_all_fans_with_stats(self) -> List[Dict[str, Any]]:
+        """Récupère tous les fans avec leurs statistiques d'achats et étiquettes pour le CRM."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT 
+                    sub.user_id,
+                    COALESCE(sub.username, '') as username,
+                    COALESCE(sub.first_name, '') as first_name,
+                    COALESCE(sub.tag, 'Nouveau') as tag,
+                    COALESCE(sub.notes, '') as notes,
+                    sub.joined_at,
+                    COUNT(s.id) as purchases_count,
+                    COALESCE(SUM(s.star_count), 0) as total_stars,
+                    MAX(s.purchased_at) as last_purchase_at
+                FROM subscribers sub
+                LEFT JOIN sales s ON sub.user_id = s.buyer_id
+                GROUP BY sub.user_id
+                ORDER BY total_stars DESC, sub.joined_at DESC
+            """) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+    async def get_fan_details(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Récupère les informations détaillées d'un fan spécifique avec son historique d'achats."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT 
+                    sub.user_id,
+                    COALESCE(sub.username, '') as username,
+                    COALESCE(sub.first_name, '') as first_name,
+                    COALESCE(sub.tag, 'Nouveau') as tag,
+                    COALESCE(sub.notes, '') as notes,
+                    sub.joined_at,
+                    COUNT(s.id) as purchases_count,
+                    COALESCE(SUM(s.star_count), 0) as total_stars
+                FROM subscribers sub
+                LEFT JOIN sales s ON sub.user_id = s.buyer_id
+                WHERE sub.user_id = ?
+                GROUP BY sub.user_id
+            """, (user_id,)) as cursor:
+                fan_row = await cursor.fetchone()
+                if not fan_row:
+                    return None
+                fan = dict(fan_row)
+
+            async with db.execute("""
+                SELECT s.star_count, s.purchased_at, COALESCE(p.title, 'Photo exclusive') as title
+                FROM sales s
+                LEFT JOIN posts p ON s.post_id = p.id
+                WHERE s.buyer_id = ?
+                ORDER BY s.purchased_at DESC
+            """, (user_id,)) as cursor:
+                purchases = [dict(r) for r in await cursor.fetchall()]
+                fan["purchases"] = purchases
+
+            return fan
+
+    async def update_fan_tag(self, user_id: int, tag: str) -> bool:
+        """Met à jour l'étiquette d'un fan."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                UPDATE subscribers
+                SET tag = ?
+                WHERE user_id = ?
+            """, (tag, user_id))
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def update_fan_notes(self, user_id: int, notes: str) -> bool:
+        """Met à jour les notes internes sur un fan."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                UPDATE subscribers
+                SET notes = ?
+                WHERE user_id = ?
+            """, (notes, user_id))
+            await db.commit()
+            return cursor.rowcount > 0
